@@ -28,33 +28,47 @@ Table of Contents
 
 ## Requirements
 
-All dependencies can be installed via:
-
+Install `OpenNMT-py` from `pip`:
 ```bash
-pip install -r requirements.txt
+pip install OpenNMT-py
 ```
 
-Note that we currently only support PyTorch 1.0.0
+or from the sources:
+```bash
+git clone https://github.com/OpenNMT/OpenNMT-py.git
+cd OpenNMT-py
+python setup.py install
+```
+
+Note: If you have MemoryError in the install try to use `pip` with `--no-cache-dir`.
+
+*(Optionnal)* some advanced features (e.g. working audio, image or pretrained models) requires extra packages, you can install it with:
+```bash
+pip install -r requirements.opt.txt
+```
+
+Note:
+
+- some features require Python 3.5 and after (eg: Distributed multigpu, entmax)
+- we currently only support PyTorch 1.2 (should work with 1.1)
 
 ## Features
 
-- [data preprocessing](http://opennmt.net/OpenNMT-py/options/preprocess.html)
-- [Inference (translation) with batching and beam search](http://opennmt.net/OpenNMT-py/options/translate.html)
-- [Multiple source and target RNN (lstm/gru) types and attention (dotprod/mlp) types](http://opennmt.net/OpenNMT-py/options/train.html#model-encoder-decoder)
-- [TensorBoard](http://opennmt.net/OpenNMT-py/options/train.html#logging)
-- [Source word features](http://opennmt.net/OpenNMT-py/options/train.html#model-embeddings)
-- [Pretrained Embeddings](http://opennmt.net/OpenNMT-py/FAQ.html#how-do-i-use-pretrained-embeddings-e-g-glove)
+- [Seq2Seq models (encoder-decoder) with multiple RNN cells (lstm/gru) and attention (dotprod/mlp) types](http://opennmt.net/OpenNMT-py/options/train.html#model-encoder-decoder)
+- [Transformer models](http://opennmt.net/OpenNMT-py/FAQ.html#how-do-i-use-the-transformer-model)
 - [Copy and Coverage Attention](http://opennmt.net/OpenNMT-py/options/train.html#model-attention)
+- [Pretrained Embeddings](http://opennmt.net/OpenNMT-py/FAQ.html#how-do-i-use-pretrained-embeddings-e-g-glove)
+- [Source word features](http://opennmt.net/OpenNMT-py/options/train.html#model-embeddings)
 - [Image-to-text processing](http://opennmt.net/OpenNMT-py/im2text.html)
 - [Speech-to-text processing](http://opennmt.net/OpenNMT-py/speech2text.html)
-- ["Attention is all you need"](http://opennmt.net/OpenNMT-py/FAQ.html#how-do-i-use-the-transformer-model)
-- [Multi-GPU](http://opennmt.net/OpenNMT-py/FAQ.html##do-you-support-multi-gpu)
+- [TensorBoard logging](http://opennmt.net/OpenNMT-py/options/train.html#logging)
+- [Multi-GPU training](http://opennmt.net/OpenNMT-py/FAQ.html##do-you-support-multi-gpu)
+- [Data preprocessing](http://opennmt.net/OpenNMT-py/options/preprocess.html)
+- [Inference (translation) with batching and beam search](http://opennmt.net/OpenNMT-py/options/translate.html)
 - Inference time loss functions.
-
-Beta Features (committed):
-- Structured attention
 - [Conv2Conv convolution model]
 - SRU "RNNs faster than CNN" paper
+- Mixed-precision training with [APEX](https://github.com/NVIDIA/apex), optimized on [Tensor Cores](https://developer.nvidia.com/tensor-cores)
 
 ## Quickstart
 
@@ -64,7 +78,7 @@ Beta Features (committed):
 ### Step 1: Preprocess the data
 
 ```bash
-python preprocess.py -train_src data/src-train.txt -train_tgt data/tgt-train.txt -valid_src data/src-val.txt -valid_tgt data/tgt-val.txt -save_data data/demo
+onmt_preprocess -train_src data/src-train.txt -train_tgt data/tgt-train.txt -valid_src data/src-val.txt -valid_tgt data/tgt-val.txt -save_data data/demo
 ```
 
 We will be working with some example data in `data/` folder.
@@ -91,7 +105,7 @@ Internally the system never touches the words themselves, but uses these indices
 ### Step 2: Train the model
 
 ```bash
-python train.py -data data/demo -save_model demo-model
+onmt_train -data data/demo -save_model demo-model
 ```
 
 The main train command is quite simple. Minimally it takes a data file
@@ -105,7 +119,7 @@ To know more about distributed training on single or multi nodes, read the FAQ s
 ### Step 3: Translate
 
 ```bash
-python translate.py -model demo-model_acc_XX.XX_ppl_XXX.XX_eX.pt -src data/src-test.txt -output pred.txt -replace_unk -verbose
+onmt_translate -model demo-model_acc_XX.XX_ppl_XXX.XX_eX.pt -src data/src-test.txt -output pred.txt -replace_unk -verbose
 ```
 
 Now you have a model which you can use to predict on new data. We do this by running beam search. This will output predictions into `pred.txt`.
@@ -122,7 +136,7 @@ Click this button to open a Workspace on [FloydHub](https://www.floydhub.com/?ut
 
 ## Pretrained embeddings (e.g. GloVe)
 
-Go to tutorial: [How to use GloVe pre-trained embeddings in OpenNMT-py](http://forum.opennmt.net/t/how-to-use-glove-pre-trained-embeddings-in-opennmt-py/1011)
+Please see the FAQ: [How to use GloVe pre-trained embeddings in OpenNMT-py](http://opennmt.net/OpenNMT-py/FAQ.html#how-do-i-use-pretrained-embeddings-e-g-glove)
 
 ## Pretrained Models
 
@@ -145,6 +159,7 @@ Major contributors are:
 [Paul Tardy](https://github.com/pltrdy) (Ubiqus / Lium)
 [François Hernandez](https://github.com/francoishernandez) (Ubiqus)
 [Jianyu Zhan](http://github.com/jianyuzhan) (Shanghai)
+[Dylan Flaute](http://github.com/flauted (University of Dayton)
 and more !
 
 OpentNMT-py belongs to the OpenNMT project along with OpenNMT-Lua and OpenNMT-tf.

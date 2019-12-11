@@ -8,7 +8,7 @@ from onmt.utils.misc import aeq
 class EncoderBase(nn.Module):
     """
     Base encoder class. Specifies the interface used by different encoder types
-    and required by :obj:`onmt.Models.NMTModel`.
+    and required by :class:`onmt.Models.NMTModel`.
 
     .. mermaid::
 
@@ -35,7 +35,7 @@ class EncoderBase(nn.Module):
         raise NotImplementedError
 
     def _check_args(self, src, lengths=None, hidden=None):
-        _, n_batch, _ = src.size()
+        n_batch = src.size(1)
         if lengths is not None:
             n_batch_, = lengths.size()
             aeq(n_batch, n_batch_)
@@ -43,14 +43,16 @@ class EncoderBase(nn.Module):
     def forward(self, src, lengths=None):
         """
         Args:
-            src (:obj:`LongTensor`):
-               padded sequences of sparse indices `[src_len x batch x nfeat]`
-            lengths (:obj:`LongTensor`): length of each sequence `[batch]`
+            src (LongTensor):
+               padded sequences of sparse indices ``(src_len, batch, nfeat)``
+            lengths (LongTensor): length of each sequence ``(batch,)``
 
 
         Returns:
-            (tuple of :obj:`FloatTensor`, :obj:`FloatTensor`):
-                * final encoder state, used to initialize decoder
-                * memory bank for attention, `[src_len x batch x hidden]`
+            (FloatTensor, FloatTensor):
+
+            * final encoder state, used to initialize decoder
+            * memory bank for attention, ``(src_len, batch, hidden)``
         """
+
         raise NotImplementedError

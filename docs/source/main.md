@@ -1,25 +1,27 @@
 # Overview
 
 
-This portal provides a detailled documentation of the OpenNMT toolkit. It describes how to use the PyTorch project and how it works.
+This portal provides a detailed documentation of the OpenNMT toolkit. It describes how to use the PyTorch project and how it works.
 
 
 
 ## Installation
-
-1\. [Install PyTorch](http://pytorch.org/)
-
-2\. Clone the OpenNMT-py repository:
-
+Install from `pip`:
+Install `OpenNMT-py` from `pip`:
 ```bash
-git clone https://github.com/OpenNMT/OpenNMT-py
-cd OpenNMT-py
+pip install OpenNMT-py
 ```
 
-3\. Install required libraries
-
+or from the sources:
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/OpenNMT/OpenNMT-py.git
+cd OpenNMT-py
+python setup.py install
+```
+
+*(Optionnal)* some advanced features (e.g. working audio, image or pretrained models) requires extra packages, you can install it with:
+```bash
+pip install -r requirements.opt.txt
 ```
 
 And you are ready to go! Take a look at the [quickstart](quickstart) to familiarize yourself with the main training workflow.
@@ -52,3 +54,5 @@ When using OpenNMT for research please cite our
 You can find additional help or tutorials in the following resources:
 
 * [Gitter channel](https://gitter.im/OpenNMT/openmt-py)
+
+* [Forum](http://forum.opennmt.net/)

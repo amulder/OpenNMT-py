@@ -2,10 +2,10 @@ import torch
 import torch.nn as nn
 
 from onmt.utils.misc import aeq
-from onmt.utils.loss import LossComputeBase
+from onmt.utils.loss import NMTLossCompute
 
 
-def collapse_copy_scores(scores, batch, tgt_vocab, src_vocabs,
+def collapse_copy_scores(scores, batch, tgt_vocab, src_vocabs=None,
                          batch_dim=1, batch_offset=None):
     """
     Given scores from an expanded dictionary
@@ -16,9 +16,14 @@ def collapse_copy_scores(scores, batch, tgt_vocab, src_vocabs,
     for b in range(scores.size(batch_dim)):
         blank = []
         fill = []
-        batch_id = batch_offset[b] if batch_offset is not None else b
-        index = batch.indices.data[batch_id]
-        src_vocab = src_vocabs[index]
+
+        if src_vocabs is None:
+            src_vocab = batch.src_ex_vocab[b]
+        else:
+            batch_id = batch_offset[b] if batch_offset is not None else b
+            index = batch.indices.data[batch_id]
+            src_vocab = src_vocabs[index]
+
         for i in range(1, len(src_vocab)):
             sw = src_vocab.itos[i]
             ti = tgt_vocab.stoi[sw]
@@ -35,8 +40,10 @@ def collapse_copy_scores(scores, batch, tgt_vocab, src_vocabs,
 
 
 class CopyGenerator(nn.Module):
-    """An implementation of pointer-generator networks (See et al., 2017)
-    (https://arxiv.org/abs/1704.04368), which consider copying words
+    """An implementation of pointer-generator networks
+    :cite:`DBLP:journals/corr/SeeLM17`.
+
+    These networks consider copying words
     directly from the source sequence.
 
     The copy generator is an extended version of the standard
@@ -88,17 +95,18 @@ class CopyGenerator(nn.Module):
     def forward(self, hidden, attn, src_map):
         """
         Compute a distribution over the target dictionary
-        extended by the dynamic dictionary implied by compying
+        extended by the dynamic dictionary implied by copying
         source words.
 
         Args:
-           hidden (`FloatTensor`): hidden outputs `[batch*tlen, input_size]`
-           attn (`FloatTensor`): attn for each `[batch*tlen, input_size]`
-           src_map (`FloatTensor`):
-             A sparse indicator matrix mapping each source word to
-             its index in the "extended" vocab containing.
-             `[src_len, batch, extra_words]`
+           hidden (FloatTensor): hidden outputs ``(batch x tlen, input_size)``
+           attn (FloatTensor): attn for each ``(batch x tlen, input_size)``
+           src_map (FloatTensor):
+               A sparse indicator matrix mapping each source word to
+               its index in the "extended" vocab containing.
+               ``(src_len, batch, extra_words)``
         """
+
         # CHECKS
         batch_by_tlen, _ = hidden.size()
         batch_by_tlen_, slen = attn.size()
@@ -125,8 +133,7 @@ class CopyGenerator(nn.Module):
 
 
 class CopyGeneratorLoss(nn.Module):
-    """ Copy generator criterion """
-
+    """Copy generator criterion."""
     def __init__(self, vocab_size, force_copy, unk_index=0,
                  ignore_index=-100, eps=1e-20):
         super(CopyGeneratorLoss, self).__init__()
@@ -138,9 +145,12 @@ class CopyGeneratorLoss(nn.Module):
 
     def forward(self, scores, align, target):
         """
-        scores (FloatTensor): (batch_size*tgt_len) x dynamic vocab size
-        align (LongTensor): (batch_size*tgt_len)
-        target (LongTensor): (batch_size*tgt_len)
+        Args:
+            scores (FloatTensor): ``(batch_size*tgt_len)`` x dynamic vocab size
+                whose sum along dim 1 is less than or equal to 1, i.e. cols
+                softmaxed.
+            align (LongTensor): ``(batch_size x tgt_len)``
+            target (LongTensor): ``(batch_size x tgt_len)``
         """
         # probabilities assigned by the model to the gold targets
         vocab_probs = scores.gather(1, target.unsqueeze(1)).squeeze(1)
@@ -167,32 +177,36 @@ class CopyGeneratorLoss(nn.Module):
         return loss
 
 
-class CopyGeneratorLossCompute(LossComputeBase):
-    """
-    Copy Generator Loss Computation.
-    """
-
-    def __init__(self, criterion, generator, tgt_vocab, normalize_by_length):
-        super(CopyGeneratorLossCompute, self).__init__(criterion, generator)
+class CopyGeneratorLossCompute(NMTLossCompute):
+    """Copy Generator Loss Computation."""
+    def __init__(self, criterion, generator, tgt_vocab, normalize_by_length,
+                 lambda_coverage=0.0):
+        super(CopyGeneratorLossCompute, self).__init__(
+            criterion, generator, lambda_coverage=lambda_coverage)
         self.tgt_vocab = tgt_vocab
         self.normalize_by_length = normalize_by_length
 
     def _make_shard_state(self, batch, output, range_, attns):
-        """ See base class for args description. """
+        """See base class for args description."""
         if getattr(batch, "alignment", None) is None:
             raise AssertionError("using -copy_attn you need to pass in "
                                  "-dynamic_dict during preprocess stage.")
 
-        return {
-            "output": output,
-            "target": batch.tgt[range_[0] + 1: range_[1], :, 0],
+        shard_state = super(CopyGeneratorLossCompute, self)._make_shard_state(
+            batch, output, range_, attns)
+
+        shard_state.update({
             "copy_attn": attns.get("copy"),
             "align": batch.alignment[range_[0] + 1: range_[1]]
-        }
+        })
+        return shard_state
 
-    def _compute_loss(self, batch, output, target, copy_attn, align):
-        """
-        Compute the loss. The args must match self._make_shard_state().
+    def _compute_loss(self, batch, output, target, copy_attn, align,
+                      std_attn=None, coverage_attn=None):
+        """Compute the loss.
+
+        The args must match :func:`self._make_shard_state()`.
+
         Args:
             batch: the current batch.
             output: the predict output from the model.
@@ -207,11 +221,16 @@ class CopyGeneratorLossCompute(LossComputeBase):
         )
         loss = self.criterion(scores, align, target)
 
+        if self.lambda_coverage != 0.0:
+            coverage_loss = self._compute_coverage_loss(std_attn,
+                                                        coverage_attn)
+            loss += coverage_loss
+
         # this block does not depend on the loss value computed above
         # and is used only for stats
         scores_data = collapse_copy_scores(
             self._unbottle(scores.clone(), batch.batch_size),
-            batch, self.tgt_vocab, batch.dataset.src_vocabs)
+            batch, self.tgt_vocab, None)
         scores_data = self._bottle(scores_data)
 
         # this block does not depend on the loss value computed above

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import argparse
 import sys
+import os
 
 
 def read_files_batch(file_list):
@@ -10,7 +11,6 @@ def read_files_batch(file_list):
     fd_list = []  # File descriptor list
 
     exit = False  # Flag used for quitting the program in case of error
-
     try:
         for filename in file_list:
             fd_list.append(open(filename))
@@ -51,7 +51,8 @@ def main():
                                corresponding to the argument 'side'.""")
     parser.add_argument("-file", type=str, nargs="+", required=True)
     parser.add_argument("-out_file", type=str, required=True)
-    parser.add_argument("-side", type=str)
+    parser.add_argument("-side", choices=['src', 'tgt'], help="""Specifies
+                               'src' or 'tgt' side for 'field' file_type.""")
 
     opt = parser.parse_args()
 
@@ -72,15 +73,34 @@ def main():
                                    reverse=True):
                 f.write("{0}\n".format(w))
     else:
+        if opt.side not in ['src', 'tgt']:
+            raise ValueError("If using -file_type='field', specifies "
+                             "'src' or 'tgt' argument for -side.")
         import torch
+        try:
+            from onmt.inputters.inputter import _old_style_vocab
+        except ImportError:
+            sys.path.insert(1, os.path.join(sys.path[0], '..'))
+            from onmt.inputters.inputter import _old_style_vocab
+
         print("Reading input file...")
+        if not len(opt.file) == 1:
+            raise ValueError("If using -file_type='field', only pass one "
+                             "argument for -file.")
         vocabs = torch.load(opt.file[0])
-        word_list = dict(vocabs)[opt.side].itos
+        voc = dict(vocabs)[opt.side]
+        if _old_style_vocab(voc):
+            word_list = voc.itos
+        else:
+            try:
+                word_list = voc[0][1].base_field.vocab.itos
+            except AttributeError:
+                word_list = voc[0][1].vocab.itos
 
         print("Writing vocabulary file...")
-        with open(opt.out_file, "w") as f:
+        with open(opt.out_file, "wb") as f:
             for w in word_list:
-                f.write("{0}\n".format(w))
+                f.write(u"{0}\n".format(w).encode("utf-8"))
 
 
 if __name__ == "__main__":

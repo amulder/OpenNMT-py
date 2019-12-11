@@ -1,31 +1,35 @@
 #!/usr/bin/env python
-""" REST Translation server """
+"""REST Translation server."""
 from __future__ import print_function
+import codecs
 import sys
 import os
-import configargparse
 import time
 import json
 import threading
 import re
 import traceback
-
+import importlib
 import torch
 import onmt.opts
 
 from onmt.utils.logging import init_logger
 from onmt.utils.misc import set_random_seed
+from onmt.utils.alignment import to_word_align
+from onmt.utils.parse import ArgumentParser
 from onmt.translate.translator import build_translator
 
 
 def critical(func):
-    """
-        Decorator for critical section (mutually exclusive code)
-    """
+    """Decorator for critical section (mutually exclusive code)"""
     def wrapper(server_model, *args, **kwargs):
-        if not server_model.running_lock.acquire(blocking=True, timeout=120):
-            raise ServerModelError("Model %d running lock timeout"
-                                   % server_model.model_id)
+        if sys.version_info[0] == 3:
+            if not server_model.running_lock.acquire(True, 120):
+                raise ServerModelError("Model %d running lock timeout"
+                                       % server_model.model_id)
+        else:
+            # semaphore doesn't have a timeout arg in Python 2.7
+            server_model.running_lock.acquire(True)
         try:
             o = func(server_model, *args, **kwargs)
         except (Exception, RuntimeError):
@@ -66,14 +70,13 @@ class ServerModelError(Exception):
     pass
 
 
-class TranslationServer():
+class TranslationServer(object):
     def __init__(self):
         self.models = {}
         self.next_id = 0
 
     def start(self, config_file):
-        """Read the config file and pre-/load the models
-        """
+        """Read the config file and pre-/load the models."""
         self.config_file = config_file
         with open(self.config_file) as f:
             self.confs = json.load(f)
@@ -89,7 +92,9 @@ class TranslationServer():
                                         parameter for model #%d""" % i)
             kwargs = {'timeout': conf.get('timeout', None),
                       'load': conf.get('load', None),
+                      'preprocess_opt': conf.get('preprocess', None),
                       'tokenizer_opt': conf.get('tokenizer', None),
+                      'postprocess_opt': conf.get('postprocess', None),
                       'on_timeout': conf.get('on_timeout', None),
                       'model_root': conf.get('model_root', self.models_root)
                       }
@@ -101,8 +106,9 @@ class TranslationServer():
 
     def clone_model(self, model_id, opt, timeout=-1):
         """Clone a model `model_id`.
-           Different options may be passed. If `opt` is None, it will use the
-           same set of options
+
+        Different options may be passed. If `opt` is None, it will use the
+        same set of options
         """
         if model_id in self.models:
             if opt is None:
@@ -113,7 +119,7 @@ class TranslationServer():
             raise ServerModelError("No such model '%s'" % str(model_id))
 
     def load_model(self, opt, model_id=None, **model_kwargs):
-        """Loading a model given a set of options
+        """Load a model given a set of options
         """
         model_id = self.preload_model(opt, model_id=model_id, **model_kwargs)
         load_time = self.models[model_id].load_time
@@ -122,7 +128,8 @@ class TranslationServer():
 
     def preload_model(self, opt, model_id=None, **model_kwargs):
         """Preloading the model: updating internal datastructure
-           It will effectively load the model if `load` is set
+
+        It will effectively load the model if `load` is set
         """
         if model_id is not None:
             if model_id in self.models.keys():
@@ -140,11 +147,13 @@ class TranslationServer():
 
     def run(self, inputs):
         """Translate `inputs`
-           We keep the same format as the Lua version i.e.
-             [{"id": model_id, "src": "sequence to translate"},{ ...}]
 
-           We use inputs[0]["id"] as the model id
+        We keep the same format as the Lua version i.e.
+        ``[{"id": model_id, "src": "sequence to translate"},{ ...}]``
+
+        We use inputs[0]["id"] as the model id
         """
+
         model_id = inputs[0].get("id", 0)
         if model_id in self.models and self.models[model_id] is not None:
             return self.models[model_id].run(inputs)
@@ -154,8 +163,10 @@ class TranslationServer():
 
     def unload_model(self, model_id):
         """Manually unload a model.
-           It will free the memory and cancel the timer
+
+        It will free the memory and cancel the timer
         """
+
         if model_id in self.models and self.models[model_id] is not None:
             self.models[model_id].unload()
         else:
@@ -170,30 +181,36 @@ class TranslationServer():
         return models
 
 
-class ServerModel:
-    def __init__(self, opt, model_id, tokenizer_opt=None, load=False,
-                 timeout=-1, on_timeout="to_cpu", model_root="./"):
-        """
-            Args:
-                opt: (dict) options for the Translator
-                model_id: (int) model id
-                tokenizer_opt: (dict) options for the tokenizer or None
-                load: (bool) whether to load the model during __init__
-                timeout: (int) seconds before running `do_timeout`
-                         Negative values means no timeout
-                on_timeout: (str) in ["to_cpu", "unload"] set what to do on
-                            timeout (see function `do_timeout`)
-                model_root: (str) path to the model directory
-                            it must contain de model and tokenizer file
+class ServerModel(object):
+    """Wrap a model with server functionality.
 
-        """
+    Args:
+        opt (dict): Options for the Translator
+        model_id (int): Model ID
+        preprocess_opt (list): Options for preprocess processus or None
+                               (extend for CJK)
+        tokenizer_opt (dict): Options for the tokenizer or None
+        postprocess_opt (list): Options for postprocess processus or None
+                                (extend for CJK)
+        load (bool): whether to load the model during :func:`__init__()`
+        timeout (int): Seconds before running :func:`do_timeout()`
+            Negative values means no timeout
+        on_timeout (str): Options are ["to_cpu", "unload"]. Set what to do on
+            timeout (see :func:`do_timeout()`.)
+        model_root (str): Path to the model directory
+            it must contain the model and tokenizer file
+    """
+
+    def __init__(self, opt, model_id, preprocess_opt=None, tokenizer_opt=None,
+                 postprocess_opt=None, load=False, timeout=-1,
+                 on_timeout="to_cpu", model_root="./"):
         self.model_root = model_root
         self.opt = self.parse_opt(opt)
-        if self.opt.n_best > 1:
-            raise ValueError("Values of n_best > 1 are not supported")
 
         self.model_id = model_id
+        self.preprocess_opt = preprocess_opt
         self.tokenizer_opt = tokenizer_opt
+        self.postprocess_opt = postprocess_opt
         self.timeout = timeout
         self.on_timeout = on_timeout
 
@@ -219,15 +236,17 @@ class ServerModel:
 
     def parse_opt(self, opt):
         """Parse the option set passed by the user using `onmt.opts`
-           Args:
-               opt: (dict) options passed by the user
 
-           Returns:
-               opt: (Namespace) full set of options for the Translator
+       Args:
+           opt (dict): Options passed by the user
+
+       Returns:
+           opt (argparse.Namespace): full set of options for the Translator
         """
+
         prec_argv = sys.argv
         sys.argv = sys.argv[:1]
-        parser = configargparse.ArgumentParser()
+        parser = ArgumentParser()
         onmt.opts.translate_opts(parser)
 
         models = opt['models']
@@ -247,6 +266,7 @@ class ServerModel:
                 sys.argv += ['-%s' % k, str(v)]
 
         opt = parser.parse_args()
+        ArgumentParser.validate_translate_opts(opt)
         opt.cuda = opt.gpu > -1
 
         sys.argv = prec_argv
@@ -266,11 +286,20 @@ class ServerModel:
         try:
             self.translator = build_translator(self.opt,
                                                report_score=False,
-                                               out_file=open(os.devnull, "w"))
+                                               out_file=codecs.open(
+                                                   os.devnull, "w", "utf-8"))
         except RuntimeError as e:
             raise ServerModelError("Runtime Error: %s" % str(e))
 
         timer.tick("model_loading")
+        if self.preprocess_opt is not None:
+            self.logger.info("Loading preprocessor")
+            self.preprocessor = []
+
+            for function_path in self.preprocess_opt:
+                function = get_function_by_path(function_path)
+                self.preprocessor.append(function)
+
         if self.tokenizer_opt is not None:
             self.logger.info("Loading tokenizer")
 
@@ -309,6 +338,14 @@ class ServerModel:
             else:
                 raise ValueError("Invalid value for tokenizer type")
 
+        if self.postprocess_opt is not None:
+            self.logger.info("Loading postprocessor")
+            self.postprocessor = []
+
+            for function_path in self.postprocess_opt:
+                function = get_function_by_path(function_path)
+                self.postprocessor.append(function)
+
         self.load_time = timer.tick()
         self.reset_unload_timer()
         self.loading_lock.set()
@@ -317,13 +354,14 @@ class ServerModel:
     def run(self, inputs):
         """Translate `inputs` using this model
 
-            Args:
-                inputs: [{"src": "..."},{"src": ...}]
+        Args:
+            inputs (List[dict[str, str]]): [{"src": "..."},{"src": ...}]
 
-            Returns:
-                result: (list) translations
-                times: (dict) containing times
+        Returns:
+            result (list): translations
+            times (dict): containing times
         """
+
         self.stop_unload_timer()
 
         timer = Timer()
@@ -366,7 +404,8 @@ class ServerModel:
                 if match_after is not None:
                     whitespaces_after = match_after.group(0)
                 head_spaces.append(whitespaces_before)
-                tok = self.maybe_tokenize(src.strip())
+                preprocessed_src = self.maybe_preprocess(src.strip())
+                tok = self.maybe_tokenize(preprocessed_src)
                 texts.append(tok)
                 sslength.append(len(tok.split()))
                 tail_spaces.append(whitespaces_after)
@@ -380,7 +419,9 @@ class ServerModel:
             try:
                 scores, predictions = self.translator.translate(
                     texts_to_translate,
-                    batch_size=self.opt.batch_size)
+                    batch_size=len(texts_to_translate)
+                    if self.opt.batch_size == 0
+                    else self.opt.batch_size)
             except (RuntimeError, Exception) as e:
                 err = "Error: %s" % str(e)
                 self.logger.error(err)
@@ -399,31 +440,41 @@ class ServerModel:
         self.reset_unload_timer()
 
         # NOTE: translator returns lists of `n_best` list
-        #       we can ignore that (i.e. flatten lists) only because
-        #       we restrict `n_best=1`
         def flatten_list(_list): return sum(_list, [])
+        tiled_texts = [t for t in texts_to_translate
+                       for _ in range(self.opt.n_best)]
         results = flatten_list(predictions)
         scores = [score_tensor.item()
                   for score_tensor in flatten_list(scores)]
 
-        results = [self.maybe_detokenize(item)
-                   for item in results]
+        results = [self.maybe_detokenize_with_align(result, src)
+                   for result, src in zip(results, tiled_texts)]
+
+        aligns = [align for _, align in results]
+        results = [self.maybe_postprocess(seq) for seq, _ in results]
 
         # build back results with empty texts
         for i in empty_indices:
-            results.insert(i, "")
-            scores.insert(i, 0)
+            j = i * self.opt.n_best
+            results = results[:j] + [""] * self.opt.n_best + results[j:]
+            aligns = aligns[:j] + [None] * self.opt.n_best + aligns[j:]
+            scores = scores[:j] + [0] * self.opt.n_best + scores[j:]
 
+        head_spaces = [h for h in head_spaces for i in range(self.opt.n_best)]
+        tail_spaces = [h for h in tail_spaces for i in range(self.opt.n_best)]
         results = ["".join(items)
                    for items in zip(head_spaces, results, tail_spaces)]
 
         self.logger.info("Translation Results: %d", len(results))
-        return results, scores, self.opt.n_best, timer.times
+        return results, scores, self.opt.n_best, timer.times, aligns
 
     def do_timeout(self):
-        """Timeout function that free GPU memory by moving the model to CPU
-           or unloading it; depending on `self.on_timemout` value
+        """Timeout function that frees GPU memory.
+
+        Moves the model to CPU or unloads it; depending on
+        attr`self.on_timemout` value
         """
+
         if self.on_timeout == "unload":
             self.logger.info("Timeout: unloading model %d" % self.model_id)
             self.unload()
@@ -467,37 +518,60 @@ class ServerModel:
 
     @critical
     def to_cpu(self):
-        """Move the model to CPU and clear CUDA cache
-        """
+        """Move the model to CPU and clear CUDA cache."""
         self.translator.model.cpu()
         if self.opt.cuda:
             torch.cuda.empty_cache()
 
     def to_gpu(self):
-        """Move the model to GPU
-        """
+        """Move the model to GPU."""
         torch.cuda.set_device(self.opt.gpu)
         self.translator.model.cuda()
 
-    def maybe_tokenize(self, sequence):
-        """Tokenize the sequence (or not)
+    def maybe_preprocess(self, sequence):
+        """Preprocess the sequence (or not)
 
-           Same args/returns as `tokenize`
         """
+
+        if self.preprocess_opt is not None:
+            return self.preprocess(sequence)
+        return sequence
+
+    def preprocess(self, sequence):
+        """Preprocess a single sequence.
+
+        Args:
+            sequence (str): The sequence to preprocess.
+
+        Returns:
+            sequence (str): The preprocessed sequence.
+        """
+        if self.preprocessor is None:
+            raise ValueError("No preprocessor loaded")
+        for function in self.preprocessor:
+            sequence = function(sequence)
+        return sequence
+
+    def maybe_tokenize(self, sequence):
+        """Tokenize the sequence (or not).
+
+        Same args/returns as `tokenize`
+        """
+
         if self.tokenizer_opt is not None:
             return self.tokenize(sequence)
         return sequence
 
     def tokenize(self, sequence):
-        """Tokenize a single sequence
+        """Tokenize a single sequence.
 
-            Args:
-                sequence: (str) the sequence to tokenize
+        Args:
+            sequence (str): The sequence to tokenize.
 
-            Returns:
-                tok: (str) the tokenized sequence
-
+        Returns:
+            tok (str): The tokenized sequence.
         """
+
         if self.tokenizer is None:
             raise ValueError("No tokenizer loaded")
 
@@ -509,11 +583,47 @@ class ServerModel:
             tok = " ".join(tok)
         return tok
 
+    @property
+    def tokenizer_marker(self):
+        marker = None
+        tokenizer_type = self.tokenizer_opt.get('type', None)
+        if tokenizer_type == "pyonmttok":
+            params = self.tokenizer_opt.get('params', None)
+            if params is not None:
+                if params.get("joiner_annotate", None) is not None:
+                    marker = 'joiner'
+                elif params.get("spacer_annotate", None) is not None:
+                    marker = 'spacer'
+        elif tokenizer_type == "sentencepiece":
+            marker = 'spacer'
+        return marker
+
+    def maybe_detokenize_with_align(self, sequence, src):
+        """De-tokenize (or not) the sequence (with alignment).
+
+        Args:
+            sequence (str): The sequence to detokenize, possible with
+                alignment seperate by ` ||| `.
+
+        Returns:
+            sequence (str): The detokenized sequence.
+            align (str): The alignment correspand to detokenized src/tgt
+                sorted or None if no alignment in output.
+        """
+        align = None
+        if self.opt.report_align:
+            # output contain alignment
+            sequence, align = sequence.split(' ||| ')
+            align = self.maybe_convert_align(src, sequence, align)
+        sequence = self.maybe_detokenize(sequence)
+        return (sequence, align)
+
     def maybe_detokenize(self, sequence):
         """De-tokenize the sequence (or not)
 
-           Same args/returns as `tokenize`
+        Same args/returns as :func:`tokenize()`
         """
+
         if self.tokenizer_opt is not None and ''.join(sequence.split()) != '':
             return self.detokenize(sequence)
         return sequence
@@ -521,8 +631,9 @@ class ServerModel:
     def detokenize(self, sequence):
         """Detokenize a single sequence
 
-           Same args/returns as `tokenize`
+        Same args/returns as :func:`tokenize()`
         """
+
         if self.tokenizer is None:
             raise ValueError("No tokenizer loaded")
 
@@ -532,3 +643,54 @@ class ServerModel:
             detok = self.tokenizer.detokenize(sequence.split())
 
         return detok
+
+    def maybe_convert_align(self, src, tgt, align):
+        """Convert alignment to match detokenized src/tgt (or not).
+
+        Args:
+            src (str): The tokenized source sequence.
+            tgt (str): The tokenized target sequence.
+            align (str): The alignment correspand to src/tgt pair.
+
+        Returns:
+            align (str): The alignment correspand to detokenized src/tgt.
+        """
+        if self.tokenizer_marker is not None and ''.join(tgt.split()) != '':
+            return to_word_align(src, tgt, align, mode=self.tokenizer_marker)
+        return align
+
+    def maybe_postprocess(self, sequence):
+        """Postprocess the sequence (or not)
+
+        """
+
+        if self.postprocess_opt is not None:
+            return self.postprocess(sequence)
+        return sequence
+
+    def postprocess(self, sequence):
+        """Preprocess a single sequence.
+
+        Args:
+            sequence (str): The sequence to process.
+
+        Returns:
+            sequence (str): The postprocessed sequence.
+        """
+        if self.postprocessor is None:
+            raise ValueError("No postprocessor loaded")
+        for function in self.postprocessor:
+            sequence = function(sequence)
+        return sequence
+
+
+def get_function_by_path(path, args=[], kwargs={}):
+    module_name = ".".join(path.split(".")[:-1])
+    function_name = path.split(".")[-1]
+    try:
+        module = importlib.import_module(module_name)
+    except ValueError as e:
+        print("Cannot import module '%s'" % module_name)
+        raise e
+    function = getattr(module, function_name)
+    return function
